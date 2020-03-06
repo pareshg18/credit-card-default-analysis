@@ -1,0 +1,1064 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+
+#----------Setting directories and Loading Packages--------------
+```{r}
+getwd()
+setwd("C:/Users/pares/OneDrive/Documents/assessments/net pay advance")
+```
+
+```{r}
+library(lubridate)
+library(ggplot2)
+library(VIM)
+library(dplyr)
+library(scales)
+library(caret)
+library(rattle)
+library(ROSE)
+library(DMwR)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+
+```
+
+###--------------Reading in the data-------------------
+
+```{r}
+train <- read.csv("2018-05-17 - Recruit Sample Data Train.csv",stringsAsFactors = FALSE)
+test <- read.csv("2018-05-17 - Recruit Sample Data Test.csv",stringsAsFactors = FALSE)
+str(train)
+str(test)
+```
+
+Lets combine the 2 datasets, so its easier to clean and pre-process the data!
+```{r}
+data <- rbind(train,test)
+
+#Lets look at the summary for the training data
+data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+  summary()
+
+```
+
+OBSERVATIONS...
+
+1. There are no missing values in the data.(there can be coded missing values.)
+2. State - A majority of applications are from California.
+3. Monthly Net Income/ Paycheck Net Income 
+-  The variable has quite a range of values. (from 70 to 184,000). From the looks of it, applicants have multiple source of incomes, where Paycheck Net Income indicates income generated through work, and monthly net income is total income earned including work and other sources(renting their houses, shares, etc.)
+ - The distribution looks mostly concentrated between 2000 to 5000. There are outliers present in the feature (Min Income is 70;Max income is 184,000).
+4. Mostly, people live in a rented house.
+5. Months.at.Residence 
+- The feature has a minimum value of 0. Could be an invalid value or an outlier or a missing value representation. Needs further investigation.
+- Max value also is quite high, given the distribution (Population has lived between 17 to 81 months at their residences).
+6. Bank.Account.Months
+- Looks like, the feature suggests, the time (in months) each applicant has held their bank accounts.
+- Max value looks like an outlier.
+7. First.Payment.Default -  There is a class imbalance issue here. We will need to balance the classes before modelling phase or use other evaluation metrics.
+
+Initial Questions about the data? (to be answered below!)
+
+1. Applicants belong to 2 different states. Usually, different states have different cost of living and different salaries. Does that hold here for the applicants?
+2. What is the billing amount for each applicant for the first payment? The Loan.Amount mentioned looks like the total loan taken by the applicant, therefore, depending on the pay-cycle, billing amount for first payment will vary for each applicant.
+3. What does Bi-Monthly and Bi-Weekly categories mean? Are they two payment period in a month/week or one payment period in two months/weeks?
+
+
+Lets fix the structural errors first!
+```{r}
+#Converting dates to date data type
+data$Time.of.Application <- ymd_hms(data$Time.of.Application)
+data$Loan.Funded.Date <- ymd(data$Loan.Funded.Date)
+data$Loan.Due.Date <- ymd(data$Loan.Due.Date)
+ 
+#Converting categorical variables to factors
+data$State <- as.factor(data$State)
+data$Rent.or.Own <- as.factor(data$Rent.or.Own)
+data$Pay.Cycle <- as.factor(data$Pay.Cycle)
+str(data)
+```
+Now, we have 3 date variables, 3 categorical variables, and 5 numerical variables. And our response variable is First.Payment.Default which is a binary categorical variable.
+
+
+###---------------DATA EXPLORATION----------------------
+
+Lets understand what each variable represents and how helpful it can be for the modelling phase.
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = First.Payment.Default)) +
+  
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill = "black") +
+  geom_text(aes(y = ((..count..)/sum(..count..)), label = scales::percent((..count..)/sum(..count..))), stat = "count", vjust = -0.25) +
+  scale_y_continuous(labels = scales::percent) +
+  ylab("Percent") +
+  ggtitle("Payment Default distribution")
+
+```
+
+Big class imbalance issue here. Around 73% of observations are those applicants who didn't default. We would need to balance these classes out later on in the analysis.
+
+
+
+#VARIABLE: MONTHLY.NET.INCOME
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Monthly.Net.Income)) +
+  geom_density() +
+  scale_x_continuous(labels = dollar) +
+  ggtitle("How is the monthly net income distributed?")
+```
+As observed before, the range for Net Income was very big, with outliers present at both ends(Min value = 70; Max value = 184,000). Therefore, the distribution is heavily skewed. Lets see the log transformed net income.
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Monthly.Net.Income)) +
+  geom_density() +
+  scale_x_log10(labels = dollar) +
+  annotation_logticks(sides = "bt") +
+  ggtitle("Monthly net income distribution on log10 scale")
+
+```
+This gives a better picture.
+Majority of the population has income in the range USD (400-30,000). The min value and max value observed before seems to be the only two anomalies present in the data. Many applicants have net incomes around 1,000; 3,000; 5,000 and 10,000.
+
+Lets, see the two anomalies in greater detail.
+
+```{r}
+data %>%
+  filter(!is.na(First.Payment.Default) & (Monthly.Net.Income < 100 | Monthly.Net.Income > 150000)) %>%
+  select(SetID,Monthly.Net.Income,Paycheck.Net.Income,Loan.Amount,First.Payment.Default)
+
+```
+
+And both of them defaulted.
+
+Looks like, the figure of 184,000 is a mis-reported figure or an error. Looking at the respective loan amount, it seems really strange that applicant with a monthly net income of 184,000 dollars would require a loan of 642.46 dollars.
+
+And, applicant with monthly net income of USD 70 requiring a loan amount of USD 117.65 is very likely to default on his first payment.
+
+#--NOTES:
+1. The difference or ratio between Monthly Net Income and the Loan Amount can be a useful feature for the modelling phase and could provide useful information to predict the defaulters.
+
+
+How does Monthly Net Income vary for non-defaulters and defaulters?
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default) & Monthly.Net.Income > 400 & Monthly.Net.Income < 30000), 
+       aes(x = First.Payment.Default, y = Monthly.Net.Income)) +
+geom_boxplot() +
+  ggtitle("Monthly Net Income for non-defaulters and defaulters")
+
+```
+
+The defaulters have a slightly higher mean than non-defaulters. The non-defaulters seem to have many high income applicants and still have a lower mean than defaulters. 
+
+#--NOTES:
+2. Monthly Net Income looks like a good feature that can be used for modelling. But since, Monthly.Net.Income is highly skewed, we need to log transform the feature.
+
+
+
+#VARIABLE: PAYCHECK.NET.INCOME
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Paycheck.Net.Income)) +
+  geom_density() +
+  scale_x_continuous(labels = dollar) +
+  ggtitle("How is the Paycheck income distributed?")
+
+```
+This, too is heavily skewed. 
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Paycheck.Net.Income)) +
+  geom_density() +
+  scale_x_log10(labels = dollar) +
+  annotation_logticks(sides = "bt") +
+  ggtitle("Paycheck Income distribution on log10 scale")
+
+```
+
+The distribution looks pretty much the same as the Monthly Net Income, range varies between USD (200-20,000). A slight difference between Paycheck Income and Net Income is expected.
+
+Lets see, how Paycheck income varies between defaulters.
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default) & Paycheck.Net.Income > 200 & Paycheck.Net.Income < 20000), 
+       aes(x = First.Payment.Default, y = Paycheck.Net.Income)) +
+  geom_boxplot() +
+  ggtitle("Paycheck Income for non-defaulters and defaulters")
+```
+Same is the case, for Paycheck Income. The two features would definitely have some positive correlations between them, therefore, it would be unwise to use both features for modelling.
+
+Lets see, the correlations between them.
+
+```{r}
+data2 <- data %>%
+  filter(!is.na(First.Payment.Default) & Monthly.Net.Income > 400 & Monthly.Net.Income < 30000
+         & Paycheck.Net.Income > 200 & Paycheck.Net.Income < 20000) 
+
+ggplot(data2,aes(x = Monthly.Net.Income, y= Paycheck.Net.Income)) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  ggtitle("Correlation between Monthly Net Income and Paycheck Net Income")
+```
+
+```{r}
+cor(data2$Monthly.Net.Income,data2$Paycheck.Net.Income)
+
+```
+As expected, there is a linear relationship between the two variables. Also, the correlation of 0.82 obtained is very high. Lets, include only Monthly.Net.Income in the feature set.
+
+
+
+#VARIABLE: MONTHS.AT.RESIDENCE
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)), aes(x = Months.at.Residence)) +
+  geom_density() +
+  ggtitle("Months Living at the residence")
+```
+
+As observed before too, many observations have 0 value, which either could indicate missing value, or people might have just moved into their residences and require additonal loan for their relocation expenses.
+There are other extreme observations too, above 400 months.
+
+Lets look at these observations in further detail.
+
+```{r}
+data %>%
+  filter(!is.na(First.Payment.Default) & Months.at.Residence == 0) %>%
+  select(State, Monthly.Net.Income, Rent.or.Own, Months.at.Residence,Bank.Account.Months,Loan.Amount, First.Payment.Default)
+```
+Interesting!!
+
+The residents from California who have 0 Months at Residence and 6 months of Bank Account, all have requested for a Loan.Amount of 117.65! 
+
+#--NOTES:
+3. Look at the relationship between Loan.Amount and Months.at.Residence and Bank.Account.Months and State.
+
+```{r}
+data %>%
+  filter(!is.na(First.Payment.Default) & Months.at.Residence > 400) %>%
+  select(State, Monthly.Net.Income, Rent.or.Own, Months.at.Residence,Bank.Account.Months,Loan.Amount, First.Payment.Default)
+```
+There seems to be some relationship between Bank.Account.Months and Loan.Amount. Here too, for 36 months people have been approved a loan of $300.
+
+There doesn't seem to be anything that indicates, a value of 0 for Months.at.Residence is a missing value. Therefore, lets consider it for its face value since, there are only 16 observations, and it doesn't seem worth the effort to replace them with other value.
+
+Lets look at the relationship between Months.at.Residence and Defaulters
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)& Months.at.Residence != 0 & Months.at.Residence < 400),  
+       aes(y = Months.at.Residence, x = First.Payment.Default)) +
+  geom_boxplot() +
+  ggtitle("Months at Residence vs First Payment Default")
+
+
+```
+The range of values for defaulters seem to be narrower than non-defualters.
+
+Will Binning the variable help?
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Months.at.Residence)) +
+  geom_density(aes(fill = First.Payment.Default,alpha = 0.1)) +
+  scale_x_log10(breaks = c(1,10,100,200,500,700)) +
+  annotation_logticks(sides = "bt") +
+  ggtitle("Time lived at residence on log10 scale")
+
+
+```
+There seems to be few sub-populations that can be useful.
+Below 5 months; 5-90; 90-400; 400+. Lets see defaulters vs non defaulters for these categories.
+
+
+```{r}
+ggplot(
+  data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+  mutate(time_stayed_months = case_when(
+    Months.at.Residence == 0 ~ "0",
+    Months.at.Residence > 0 & Months.at.Residence < 5 ~ "1-5",
+    Months.at.Residence >= 5 & Months.at.Residence < 90 ~ "5-90",
+    Months.at.Residence >= 90 & Months.at.Residence < 400 ~ "90-400",
+    Months.at.Residence >= 400 ~ "400+")),aes(x = time_stayed_months))  +
+  geom_bar(aes(fill = First.Payment.Default),position = "fill") +
+  geom_point(aes(y=-0.05),size = 0.75,alpha = 0.3,position = position_jitter(h=0.01)) +
+  ggtitle("Defaulters in different time durations at their residences")
+
+```
+Although, most of population has lived for 5-400 months, the default rate for applicants with 0 months is the highest and for applicants with 400+ months, it is the lowest.
+
+#--NOTES:
+4. Discretize the Months.at.Residence feature and include in the feature set.
+
+
+
+#VARIABLE: BANK.ACCOUNT.MONTHS
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Bank.Account.Months)) +
+  geom_density() +
+  ggtitle("Bank Accounts distribution")
+
+```
+
+Again, we have the same situation as before. Lets look at the outliers first.
+
+
+```{r}
+data %>%
+  filter(!is.na(First.Payment.Default) & Bank.Account.Months > 100) %>%
+  select(State, Monthly.Net.Income,Rent.or.Own,Months.at.Residence,Bank.Account.Months,Loan.Amount, First.Payment.Default)
+```
+Nothing seems to be out of place here!
+
+Lets see the defaulters vs Bank Account Months data...
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Bank.Account.Months)) +
+  geom_density(aes(fill = First.Payment.Default,alpha = 0.1)) +
+  scale_x_log10() +
+  annotation_logticks(sides = "bt") +
+  ggtitle("Bank Account distribution on log10 scale for defaulters")
+
+```
+
+There seems to be sub-populations here too. Lets see if binning will work here too.
+
+
+```{r}
+ggplot(
+  data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+  mutate(bank_account_time = case_when(
+    Bank.Account.Months > 0 & Bank.Account.Months < 10 ~ "0-10",
+    Bank.Account.Months >= 10 & Bank.Account.Months < 20 ~ "10-20",
+    Bank.Account.Months >= 20 & Bank.Account.Months < 100 ~ "20-100",
+    Bank.Account.Months >= 100 ~ "100+")),aes(x = bank_account_time))  +
+  geom_bar(aes(fill = First.Payment.Default),position = "fill") +
+  geom_point(aes(y=-0.05),size = 0.75,alpha = 0.3,position = position_jitter(h=0.01)) +
+  ggtitle("Defaulters having different time durations - bank accounts")
+
+```
+Bank Account doesn't seem a good candidate for the modelling phase. Therefore, we will not include it.
+
+
+#VARIABLE: LOAN.AMOUNT
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Loan.Amount)) +
+  geom_density() +
+  ggtitle("Loan Amount distribution") 
+
+```
+
+Given that company offers short term loans, the range of 100-600 seems good.
+
+But being a continous variable, there seems to be many oddly similar amounts present. This could be because, the company might be giving out only a specific amount of loan depending on the risk factor of applicant.
+
+How many unique values are there?
+```{r}
+data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+  select(Loan.Amount) %>%
+  unique() %>%
+  nrow()
+```
+Out of 600 values, there are only 113 distinct values. The loan amount is given in decimals. There is not much of a different between amount for example, 50.30 and 50.67. Lets find out, distinct whole number values.
+
+```{r}
+data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+  select(Loan.Amount) %>%
+  round() %>%
+  unique() %>%
+  nrow()
+
+```
+Practically speaking, there are only 33 values assigned for 1600 observations. 
+
+How is the loan amount calculated?
+
+The company website mentions that maximum loan amount for California is USD 255. The eligible loan amounts for single pay loan is between USD 100-1000, and for installment loan, it is between USD 100-1500.
+
+Lets see, if other features can tell us anything about the loan amounts.
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = State,y = Loan.Amount )) +
+  geom_boxplot()  +
+  ggtitle("Loan Amount for different State") 
+
+```
+Woah. Loan Amounts are completely different for the two states. Also, the maximum loan offered in California is USD 300 contrary to what the website mentions.
+
+We observed above that applicants who had 0 Months.at.Residence and 6 months of Bank Account, all have requested for a Loan.Amount of 117.65!
+
+Lets see, if these two variables affect the loan amount.
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default) & Months.at.Residence != 0 & Months.at.Residence < 400),
+       aes(x = Loan.Amount, y = Months.at.Residence )) +
+  geom_point()  +
+  geom_smooth(method = "loess") +
+  ggtitle("Loan distribution vs Months.at.Residence") 
+
+```
+There doesn't seem to be a pattern here.
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default), Bank.Account.Months < 100),
+       aes(x = Loan.Amount, y = Bank.Account.Months )) +
+  geom_point()  +
+  geom_smooth(method = "loess") +
+  ggtitle("Loan distribution vs Bank.Account.Months") 
+
+```
+Here too, no pattern seems to exist.
+
+Therefore, state does play a big factor in deciding the Loan Amount approved. Based on the data, not much can be said about other factors.
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = round(Loan.Amount) )) +
+  geom_density(aes(fill = First.Payment.Default,alpha=0.1)) +
+  scale_x_continuous(breaks = c(100,150,200,250,300,350,400,450,500,550,600,650)) + xlab("Loan Amount") +
+  ggtitle("Loan Amount distribution for defaulter and non-defaulters") 
+```
+
+Loan Amount looks a good feature that can be useful for the modelling phase.
+
+#--NOTES:
+5. We can normalize loan amount values using either mean or median. Since, distribution varies for each state, we'll have to do it separately.
+
+
+Lets look at Categorical variables now!
+
+#VARIABLE: STATE
+
+We already know that majority of applications are from California. Lets look at defaulters from each state.
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = State))+
+  geom_bar(aes(fill = First.Payment.Default),position = "fill")  +
+  ggtitle("State-wise default rate")
+
+```
+Texas clearly has more percentage of defualters. Therefore, state could be an important factor.
+
+#VARIABLE: RENT.OR.OWN
+
+Majority of applicants live in a rented house. Does that indicate default?
+```{r}
+ggplot(subset(data,!is.na(data$First.Payment.Default)),aes(x = Rent.or.Own))+
+  geom_bar(aes(fill = First.Payment.Default),position = "fill") +
+  ggtitle("Housing Type- wise default rate")
+
+```
+It doesn't seem to be a good indicator. 
+
+Intiutively, living at a rented house can indicate responsibility on part of the applicant, as he would be paying monthly rents. But, owning a house could indicate how well-off the applicant is financially. In the case of short term loan, it seems pre-mature to think such a feature could play a role in defaulting. Therefore, I'll exclude this feature from the analysis.
+
+
+#VARIABLE: PAY CYCLE
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Pay.Cycle))+
+  geom_bar() +
+  ggtitle("Pay Cycle distribution")
+
+```
+People prefer either a bi-weekly cycle or a monthly cycle. Very few prefer a weekly cycle.
+
+But, what does bi-monthly/bi-weekly represent? Is it two payment periods in a month/week or one payment period in two months/weeks?
+
+Based on research online, for loan payment plans, bi-weekly usually is referred to a single payment period in 2 weeks. And, Bi-Monthly refers to 2 payment periods in a month.
+
+Questions?
+
+Does that mean, on the due date, an applicant with USD 100 loan amount on a Bi-monthly pay cycle will have to pay half the amount (USD 50) by the due date? Or, an applicant on Bi-weekly pay cycle will have to full amount in 2 weeks? And, who decides the pay-cycle, is it the applicant or the company?
+
+To answer this, we need to know How is the Due Date Calculated?
+
+On Company's website, it says for the short term loans, entire loan amount is to be paid by the due date. And, the due date is calculated based on the applicant's pay day (that is 8 or more days away from the funded date and less than 31 days.) If payday falls outside the range, then due date becomes 31 days.
+
+If that is the case here, then how does pay-cycle play a role here? Is the First Payment different than the Loan Amount? And if that is the case, each applicant will be required to pay different amounts based on their pay-cyles. But, then there are many applicants having Monthly pay cycles with due date within next 10 days.
+
+#--NOTES:
+6. With such less clarity on what the variable represents, it would be unwise to use the feature for modelling and would make it harder to nterpret the results. So, lets not include Pay.Cycle
+
+
+#-----------ADDITIONAL EXPLORATION----------------------
+
+We found above that loan amounts differ drastically for applicants in different states. Is it because people require less amount or is it company policy?
+
+Lets explore applicants from different states and how their lifestyles differ?
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)), aes(x = Monthly.Net.Income)) +
+  geom_density() +
+  scale_x_log10(labels = dollar) +
+  annotation_logticks() +
+  facet_grid(State ~.) +
+  ggtitle("Monthly Net Income for different states")
+
+```
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)), aes(x = Paycheck.Net.Income)) +
+  geom_density() +
+  scale_x_log10(labels = dollar) +
+  annotation_logticks() +
+  facet_grid(State ~.) +
+  ggtitle("Paycheck Income for different states")
+
+```
+
+
+```{r}
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = Rent.or.Own)) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  geom_text(aes(y = ((..count..)/sum(..count..)), label = scales::percent((..count..)/sum(..count..))), stat = "count", vjust = -0.25) +
+  facet_grid(State~.) +
+  ylim(0,0.8) + ylab("Percent") +
+  ggtitle("Percentage breakdown for the type of housing between States")
+```
+
+The data ranges looks very similar and type of housing between states look pretty much the same.
+
+Now, lets check the patterns in monthly net income and the loan amounts, whether small incomes attract additional loan amounts to pay for expenses.
+
+```{r}
+ggplot(data %>%
+          filter(!is.na(First.Payment.Default) & Monthly.Net.Income > 400 & Monthly.Net.Income < 30000), 
+       aes(x = Monthly.Net.Income, y = Loan.Amount) ) +
+  geom_point() +
+  geom_smooth() +
+  facet_grid(State~.)
+  ggtitle("Monthly Income vs Loan Amount")
+
+```
+No pattern seems to exist here. How much is the correlation between them?
+
+```{r}
+data2 <- data %>%
+  filter(!is.na(First.Payment.Default) & Monthly.Net.Income > 400 & Monthly.Net.Income < 30000) 
+cor(data2$Monthly.Net.Income,data2$Loan.Amount)
+```
+Woah! A positive correlation. Intuitively, as income increases, applicant's loan amount should have decreased. But, here, though a weak correlation, it is positive.
+
+Based on the given data and using information from company's website regarding max loan amount for California, it would be safe to assume the difference between loan amount between states is related to company's policy.
+
+```{r}
+remove(data2)
+```
+
+
+#-----------FEATURE ENGINEERING------------------
+
+Lets create some additional features...
+
+
+
+1. Some applications are riskier than others. High risk applications would require more time to get approved. Therefore, time taken between applicaton and getting funded could be a helpful feature.
+
+```{r}
+data$time_taken_to_approve <- as.numeric(difftime(data$Loan.Funded.Date, date(data$Time.of.Application),units = "days")) 
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = time_taken_to_approve)) +
+  geom_density(aes(fill = First.Payment.Default,alpha = 0.1)) +
+  scale_x_log10() +
+  annotation_logticks()
+```
+There were around 1311 application that were approved on the same day. But from the other applications, there seems to be a significant difference between peaks of those who defaulted and those who didn't.  Therefore, this feature could be useful.
+
+
+2. Due date is decided based on the pay day of the applicant. Many applicants have additional sources of income and therefore, the time between getting the loan and the due date is crucial. Having, more days means a higher likelihood of paying the first payment. Therefore, time to pay each payment could play an influential role.
+
+```{r}
+data$time_to_pay_payment <- as.numeric(difftime(data$Loan.Due.Date,data$Loan.Funded.Date,units = "days"))
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = time_to_pay_payment)) +
+  geom_density(aes(fill = First.Payment.Default,alpha = 0.1)) +
+  ggtitle("Time to pay each payment")
+
+
+```
+Mostly, the distribution is same, but there is a peak at 15 days for people who defaulted. That could play a good factor for differentiating.
+
+
+3. As many applicants have multiple sources of income, any income above the paycheck is usually considered as a bonus income. Lets see the additional income distribution between applicants and what influence does that play in avoiding a default.
+
+```{r}
+data$additional_income <- data$Monthly.Net.Income - data$Paycheck.Net.Income
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = additional_income)) +
+  geom_density(aes(fill = First.Payment.Default,alpha = 0.1)) +
+  scale_x_log10() +
+  annotation_logticks() +
+  ggtitle("Additonal Income for defaulters and non-defaulters")
+
+```
+This could an important factor.
+
+4. What percent of net income is the loan amount?
+```{r}
+data$loan_income_ratio <- data$Loan.Amount/data$Monthly.Net.Income
+ggplot(data %>%
+         filter(!is.na(First.Payment.Default)),aes(x = loan_income_ratio)) +
+  geom_density(aes(fill = First.Payment.Default,alpha = 0.1)) +
+  scale_x_log10() +
+  annotation_logticks(sides = "bt") +
+  ggtitle("Loan Amount as percentage of net income")
+
+
+```
+There is a peak at 0.05 or 5% that separates the people who are more likely to default. Rest of the population is pretty much the same.
+
+
+#--NOTES
+7. List of final Features - State; Monthly Net Income; Months at Residence ; Loan Amount; Time taken to approve; Time to pay payment; Additional Income; Loan Income Ratio
+
+
+#----------------MODEL PREPARATION--------------------
+
+We made some observations regarding transforming a few variables. Lets do that first.
+
+#1. Log transformation of Monthly Net Income
+
+```{r}
+data$log_Monthly.Net.Income <- log10(data$Monthly.Net.Income)
+```
+
+#2. Discretization of Months.at.Residence
+
+```{r}
+data <- 
+  data %>%
+  mutate(time_stayed_months = case_when(
+    Months.at.Residence == 0 ~ "0",
+    Months.at.Residence > 0 & Months.at.Residence < 5 ~ "1-5",
+    Months.at.Residence >= 5 & Months.at.Residence < 90 ~ "5-90",
+    Months.at.Residence >= 90 & Months.at.Residence < 400 ~ "90-400",
+    Months.at.Residence >= 400 ~ "400+"))
+```
+
+#3. Normalizing Loan Amount
+
+Normalized the Loan Amounts with the median of each state (considered only the training set). Applicants with a Loan Amount higher than the median amount of their state have a loan_normalized value larger than 1, and applicants with a loan amount lower than the median amount of their state have a loan_normalized value less than 1. 
+
+```{r}
+
+median_loan_CA <- 
+  data %>%
+  filter(!is.na(First.Payment.Default) & State == "CA") %>%
+  select(Loan.Amount) %>%
+  summarise(loan_CA = median(Loan.Amount))
+
+median_loan_TX <- 
+  data %>%
+  filter(!is.na(First.Payment.Default) & State == "TX") %>%
+  select(Loan.Amount) %>%
+  summarise(loan_TX = median(Loan.Amount))
+
+median_loan <- t(cbind(median_loan_CA,median_loan_TX))
+median_loan <- cbind(c("CA","TX"),median_loan)
+rownames(median_loan) <- NULL
+colnames(median_loan) <- c("State","median_loan")
+median_loan <- as.data.frame(median_loan)
+
+data <- 
+  data %>%
+  left_join(.,median_loan,by = "State") %>%
+  mutate(loan_normalized = Loan.Amount/as.numeric(as.character(median_loan)))
+
+
+```
+
+Lets also scale the new features created.
+```{r}
+mean_additional_income <-
+  data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+    summarise(mean_income = mean(additional_income))
+mean_additional_income <- as.numeric(mean_additional_income)
+
+sd_additional_income <-
+  data %>%
+  filter(!is.na(First.Payment.Default)) %>%
+    summarise(sd_income = sd(additional_income))
+sd_additional_income <- as.numeric(sd_additional_income)
+
+data$scaled_additional_income <- (data$additional_income - mean_additional_income)/sd_additional_income
+```
+
+
+Lets keep only the features we'll be using and remove all the un-necessary variables.
+
+```{r}
+data <- 
+  data %>%
+  select(State,log_Monthly.Net.Income,time_stayed_months,loan_normalized,time_taken_to_approve,time_to_pay_payment, scaled_additional_income,loan_income_ratio,First.Payment.Default)
+data$time_stayed_months <- as.factor(data$time_stayed_months)
+```
+
+
+```{r}
+remove(median_loan,median_loan_CA,median_loan_TX,mean_additional_income,sd_additional_income)
+```
+
+#Train and test splits
+
+```{r}
+train <- data %>%
+  filter(!is.na(First.Payment.Default))
+test <- data %>%
+  filter(is.na(First.Payment.Default))
+```
+
+
+We need to convert our logical response variable into other names, to avoid confusion in the modelling phase
+
+```{r}
+
+#Converting repsonse variable to yes/no, otherwise we'll get trouble in the modelling
+
+train$First.Payment.Default <- as.character(train$First.Payment.Default)
+
+train$First.Payment.Default[train$First.Payment.Default == "TRUE"] <- "yes"
+train$First.Payment.Default[train$First.Payment.Default == "FALSE"] <- "no"
+
+train$First.Payment.Default <- as.factor(train$First.Payment.Default)
+
+```
+
+
+We need a validation set to evaulate our models. Lets create a 80/20 split in the training set to create a validation set, and maintain the proportion of class distribution in the training and validation set.
+
+```{r}
+prop.table(table(train$First.Payment.Default))
+```
+
+73% observations are non-defaulters and 26% are defaulters.
+
+```{r}
+set.seed(3456)
+train_index <- createDataPartition(train$First.Payment.Default,p = 0.8)[[1]]
+validation <- train[-train_index,]
+training <- train[train_index,]
+remove(train)
+```
+
+```{r}
+cat("train class distribution",prop.table(table(training$First.Payment.Default)))
+cat("\n")
+cat("\n")
+cat("validation class distribution",prop.table(table(validation$First.Payment.Default)))
+```
+Now, class distribution is pretty similar between our training and validation sets.
+
+
+#------------------MODELLING----------------------------
+
+#CLASS IMBALANCE
+
+There is a big class imbalance issue that needs to be sorted out.
+
+```{r}
+ggplot(training, aes(x = First.Payment.Default)) +
+  geom_bar() +
+  ggtitle("Class Imbalance")
+```
+
+Lets try modelling with observations as is, and see the results, and then we'll try and balance the classes and compare the results.
+
+#EVALUATION METRICS
+
+Since, our main aim is to identify the defaulters correctly, apart from accuracy, we'll also look at:
+1. Specificity (Out of total defaulters, how many were correctly identified?)
+2. Neg Pred Value (Out of total predicted defaulters, how many were correct?)
+
+
+#k-fold cross validation
+Lets do k-fold cross validation with k=10, since we are short on training data. And, with cross validation, we'll look to optimize specificity.
+```{r}
+control <- trainControl(method = "cv",number = 10,classProbs = TRUE,summaryFunction = twoClassSummary)
+
+```
+
+#Logisitc Regression
+
+Lets start with logistic regression
+
+```{r}
+set.seed(123)
+log_reg1 <- train(form = First.Payment.Default ~ ., data = training, method = "glm", family = "binomial", 
+                  trControl = control, metric = "Spec")
+summary(log_reg1)
+```
+The model does not seem to consider a lot of the features as significant.
+```{r}
+#Lets see how this model performed
+confusionMatrix(predict(log_reg1,validation),validation$First.Payment.Default)
+```
+This model classifies almost all the observations as non-defaulting. And that can be attributed to the class imbalance in the data. Lets look at tree-based models.  
+
+#Decision Tree
+
+```{r}
+set.seed(123)
+tree1 <- train(form = First.Payment.Default ~ ., data = training, method = "rpart", trControl = control, metric = "Spec")
+fancyRpartPlot(tree1$finalModel)
+```
+
+```{r}
+confusionMatrix(predict(tree1,validation),validation$First.Payment.Default)
+```
+Although, decision tree performs better than logisitic regression, but specificity here is a mere 23%.
+
+Lets look at ensemble method, Random Forest.
+
+#Random Forest
+```{r}
+set.seed(123)
+rf_tree1 <- train(form = First.Payment.Default ~ ., data = training, method = "rf",ntree = 500, trControl = control, metric = "Spec")
+plot(rf_tree1$finalModel)
+```
+
+```{r}
+confusionMatrix(predict(rf_tree1,validation),validation$First.Payment.Default)
+```
+Random Forest definitely has improved metrics here. Now, we have increased our accuracy and are correctly identifying aprrox. 21% of fraud cases. But, we need to do better.
+
+Lets try balancing the classes now!
+
+#Class Balancing
+
+We could do 3 things here.
+1. Over-sample the minority class
+2. Under sample the majority class
+3. Synthesize new minority class
+
+I don't want to under sample here since we are already limited on training set, under-sampling it would mean losing more data.
+Lets try and do other two.
+
+#Over-sampling minority class
+
+```{r}
+set.seed(657)
+training_over_sample <- ovun.sample(First.Payment.Default ~ ., data = training,method = "over")$data
+prop.table(table(training_over_sample$First.Payment.Default))
+```
+With over-sampling, we now have a fairly balanced dataset. Lets build model using this.
+
+```{r}
+set.seed(123)
+log_reg2 <- train(form = First.Payment.Default ~ ., data = training_over_sample, method = "glm", family = "binomial",
+                  trControl = control, metric = "Spec")
+summary(log_reg2)
+```
+Logistic regression now, seems to consider more features significant than before. Lets see how it performs on validation set.
+
+```{r}
+confusionMatrix(predict(log_reg2,validation),validation$First.Payment.Default)
+```
+We now perform much better on the fraudulent cases. Our specificity has gone up to 57%. 
+Earlier our best performing model had a specificity of 23%.
+
+Lets look at decision tree and random forest.
+
+```{r}
+set.seed(123)
+tree2 <- train(form = First.Payment.Default ~ ., data = training_over_sample, method = "rpart", trControl = control, metric = "Spec")
+#fancyRpartPlot(tree2$finalModel)
+
+```
+
+
+```{r}
+confusionMatrix(predict(tree2,validation),validation$First.Payment.Default)
+```
+Oh. Decision Tree now classifies everyone as fraudulent.
+
+```{r}
+set.seed(123)
+rf_tree2 <- train(form = First.Payment.Default ~ ., data = training_over_sample, method = "rf",ntree = 500,
+                  trControl = control, metric = "Spec")
+plot(rf_tree2$finalModel)
+
+```
+
+
+```{r}
+confusionMatrix(predict(rf_tree2,validation),validation$First.Payment.Default)
+```
+Specificity of 32%. And an accuracy of 65%.
+
+Over-sampling has definitely improved our results. Lets also try to synthesize new data and compare the results.
+
+#Synthesizing new data
+
+```{r}
+set.seed(567)
+training_smote <- DMwR::SMOTE(form = First.Payment.Default ~ ., data = training,perc.over = 100,perc.under = 200) 
+table(training_smote$First.Payment.Default)
+```
+Now, we have a 50/50 balanced data set, where we have synthetically generated 340 minority classes and sample 680 majority classes from original 940 majority classes. Lets use this data for modelling.
+
+```{r}
+set.seed(123)
+log_reg3 <- train(form = First.Payment.Default ~ ., data = training_smote, method = "glm", family = "binomial",
+                  trControl = control, metric = "Spec")
+summary(log_reg3)
+
+```
+```{r}
+confusionMatrix(predict(log_reg3,validation),validation$First.Payment.Default)
+```
+We are getting good results with synthetic data as well.
+
+```{r}
+set.seed(123)
+tree3 <- train(form = First.Payment.Default ~ ., data = training_smote, method = "rpart", trControl = control, metric = "Spec")
+fancyRpartPlot(tree3$finalModel)
+
+```
+
+
+```{r}
+confusionMatrix(predict(tree3,validation),validation$First.Payment.Default)
+```
+A specificity of 76% and an accuracy of 42%.
+
+```{r}
+set.seed(123)
+rf_tree3 <- train(form = First.Payment.Default ~ ., data = training_smote, method = "rf",ntree = 500, 
+                  trControl = control, metric = "Spec")
+plot(rf_tree3$finalModel)
+
+```
+
+```{r}
+confusionMatrix(predict(rf_tree3,validation),validation$First.Payment.Default)
+```
+The smoted dataset and oversampled dataset, both are giving very similar results on the three algorithms used. The results from SMOTE'd dataset are slightly better, so lets use that from here on.
+
+Lets see if we can optimize the algorithms to better our results.
+
+#--Tuning Decision Tree
+
+Tree based models were performing well before, so lets start with them.
+```{r}
+set.seed(123)
+tree4 <- rpart(First.Payment.Default ~ ., data = training_smote,method = "class", control = rpart.control(cp = 0),
+                   parms = list(split = c("information","gini"), loss = matrix(c(0,1,1,0), byrow = TRUE, nrow = 2))) 
+
+rpart.plot(tree4)
+```
+A fully grown tree.
+```{r}
+printcp(tree4)
+```
+We'll now prune the fully grown tree with the optimal complexity paramter, cp = 0.00294118
+```{r}
+
+tree4_prune <- prune.rpart(tree4,cp = 0.00294118)
+rpart.plot(tree4_prune, main = "Pruned tree")
+```
+
+```{r}
+confusionMatrix(predict(tree4_prune,validation,type = "class"),validation$First.Payment.Default)
+```
+We have improved on the overall performance of the model with tuned parameters of decision tree model. We now have an accuracy of 68%.
+And, a specificity of 37%.
+
+#--Tuning Random Forest
+
+Lets look at tuned random forest.
+
+```{r}
+rf_tune <- tuneRF(x = training_smote[,-9], y = training_smote$First.Payment.Default,ntreeTry = 500, mtryStart = 4, stepFactor = 0.5, improve = 0.01)
+rf_tune
+```
+
+
+```{r}
+set.seed(123)
+rf_tree4 <- randomForest(First.Payment.Default ~., data = training_smote, mtry = 2,ntree=500)
+rf_tree4
+```
+
+```{r}
+confusionMatrix(predict(rf_tree4,validation,type = "class"),validation$First.Payment.Default)
+```
+This is pretty similar to the one we obtained before.
+
+Lets also try gradient boosted decision trees - XGB
+#XGB
+```{r}
+set.seed(123)
+xgb1 <- train(First.Payment.Default ~ ., data = training_smote, method = "xgbTree",trControl = control,metric = "Spec")
+```
+
+
+```{r}
+confusionMatrix(predict(xgb1,validation),validation$First.Payment.Default)
+```
+
+This has been our best performing model thus far. Lets use this model to get our prediction on the test set.
+```{r}
+predictions <- predict(xgb1,test)
+test$First.Payment.Default <- predictions
+table(test$First.Payment.Default)
+```
+My best performing model identifies 141 fradulent cases from the 400 from the test set.
+
+```{r}
+#Converting yes/no predictions to given logical observations
+pred_logical <- as.character(predictions) 
+pred_logical[pred_logical == "yes"] <- TRUE
+pred_logical[pred_logical == "no"] <- FALSE
+
+#writing predictions to the given test file
+tmp <- read.csv("2018-05-17 - Recruit Sample Data Test.csv")
+tmp <- cbind(tmp, pred_logical)
+colnames(tmp)[14] <- "predictions"
+write.csv(tmp, "2018-05-17 - Recruit Sample Data Test_with_predicitions.csv")
+
+```
+
+
+
+
+
+
