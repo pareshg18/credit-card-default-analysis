@@ -1,3 +1,5 @@
+--------------THIS ANALYSIS IS DONE IN R USING JUPYTER NOTEBOOK----------------
+
 # Loan-default-analysis
 
 This project is an analysis to identify customers who might default on their first payment. Through this project, I wanted to identify the important 
