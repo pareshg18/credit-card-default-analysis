@@ -17,7 +17,7 @@ Correlation matrix
 
 ![corr-credit](https://user-images.githubusercontent.com/45079009/85041495-d8b43980-b13e-11ea-8233-0d0b937da81b.PNG)
 
-# Models Testes
+# Models Tested
 1. Logistic Regression
 2. Decision Tree
 3. Random Forest
